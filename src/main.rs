@@ -181,7 +181,7 @@ fn furnace_test(mu: f32, a2: f32, samples: &[Vec3]) -> f32
             let n_h = dot(&n, &h).clamp(0.0, 1.0);
             let d = 1.0;//d_ggx(n_h, a2); // simplify with the pdf
             let f = 1.0;//fresnel_schlick(f0, 1.0, v_h); // Always 1.0
-            let g = v_smith_u(n_l, n_v, a2);
+            let g = v_smith(n_l, n_v, a2);
             let s = d * f * g; // (4.0 * n_h * n_v) simplify with V
             // let s = brdf_s(n_v, n_l, n_h, v_h, a, f0);
             let pdf = 4.0 * v_h / n_h;
@@ -194,12 +194,62 @@ fn furnace_test(mu: f32, a2: f32, samples: &[Vec3]) -> f32
     acc / samples.len() as f32
 }
 
-fn sample_lut(u : f32, v : f32, lut: &Rgb32FImage) -> &Rgb<f32>
+fn furnace_test_with_lut(mu: f32, rough: f32, samples: &[Vec3], lut: &Rgb32FImage) -> f32
 {
-    let px = u as u32;
-    let py = v as u32;
+    assert!(mu >= 0.0 && mu <= 1.0);
+    let a = rough * rough;
+    let a2 = a * a;
+    let mut acc = 0.0;
+    let n = Vec3::new(0.0, 0.0, 1.0);
+    let view_dir = Vec3::new((1.0-mu*mu).sqrt(), 0.0, mu);
+    for xi in samples
+    {
+        let h = xi;
+        let light_dir = 2.0 * dot(&view_dir, h) * *h - view_dir;
+        let n_l = dot(&n, &light_dir);
+        if n_l > 0.0
+        {
+            let n_v = mu;
+            let v_h = dot(&view_dir, &h).clamp(0.0, 1.0);
+            let n_h = dot(&n, &h).clamp(0.0, 1.0);
+            let d = 1.0;//d_ggx(n_h, a2); // simplify with the pdf
+            let f = 1.0;//fresnel_schlick(f0, 1.0, v_h); // Always 1.0
+            let g = v_smith(n_l, n_v, a2);
+            let s = d * f * g; // (4.0 * n_h * n_v) simplify with V
+            let pdf = 4.0 * v_h / n_h;
+            acc += (s + f_multi_scatter(n_v, n_l, rough, lut)) * n_l * pdf;
+        }
+    }
+    acc / samples.len() as f32
+}
 
-    lut.get_pixel(px, py)
+
+fn lerp(a : Rgb<f32>, b : Rgb<f32>, t : f32) -> Rgb<f32>
+{
+    let r = a[0] + (b[0] - a[0]) * t;
+    let g = a[1] + (b[1] - a[1]) * t;
+    let b = a[2] + (b[2] - a[2]) * t;
+    Rgb([r, g, b])
+}
+
+fn sample_lut(u : f32, v : f32, lut: &Rgb32FImage) -> Rgb<f32>
+{
+    let px = (u as u32);
+    let px_next = (px + 1).min(LUT_RES - 1);
+    let py = (v as u32);
+    let py_next = (py + 1).min(LUT_RES - 1);
+
+    let a = *lut.get_pixel(px, py);
+    let b = *lut.get_pixel(px_next, py);
+    let c = *lut.get_pixel(px, py_next);
+    let d = *lut.get_pixel(px_next, py_next);
+
+    let ku = u - u.floor();
+    let kv = v - v.floor();
+
+    let e = lerp(a, b, ku);
+    let f = lerp(c, d, ku);
+    lerp(e, f, kv)
 }
 
 fn f_multi_scatter(n_v : f32, n_l : f32, rough : f32, lut: &Rgb32FImage) -> f32
@@ -209,7 +259,7 @@ fn f_multi_scatter(n_v : f32, n_l : f32, rough : f32, lut: &Rgb32FImage) -> f32
     let a = rough * LUT_RES as f32;
     let Ev = sample_lut(mu_v, a, lut);
     let El = sample_lut(mu_l, a, lut);
-    let E_avg = Ev[1];
+    let E_avg = PI * Ev[1];
     Ev[0]*El[0]/E_avg
 }
 
@@ -252,14 +302,10 @@ fn render_sphere( img: &mut RgbImage, rough: f32, f0: f32, lut: &Rgb32FImage)
                     let n_h = dot(&n, &h).clamp(0.0, 1.0);
                     let d = d_ggx(n_h, a2);
                     let f = fresnel_schlick(f0, 1.0, v_h); // Always 1.0
-                    let g = v_smith_u(n_l, n_v, a2);
+                    let g = v_smith(n_l, n_v, a2);
                     let s = d * f * g; // (4.0 * n_h * n_v) simplify with V
-                    // let s = brdf_s(n_v, n_l, n_h, v_h, a, f0);
-                    let pdf = 4.0 * v_h / n_h;
-                    // let pdf = 1.0 / TAU; // pdf is d_ggx() cos(theta) sin(theta)
-                    // let pdf = 1.0; // pdf is d_ggx() cos(theta) sin(theta)
-                                   // but it simplify with s that should be multiplied by cos(theta)
-                    result = (s + f_multi_scatter(n_v, n_l, rough, lut)) * n_l;// / (4.0 * n_v);
+                    // result = (s) * n_l;
+                    result = (s + f_multi_scatter(n_v, n_l, rough, lut)) * n_l;
                 }
 
                 let t = tonemap(result);
@@ -274,7 +320,7 @@ fn render_sphere( img: &mut RgbImage, rough: f32, f0: f32, lut: &Rgb32FImage)
 }
 
 fn main() {
-    const BIT_DEPTH :usize = 9;
+    const BIT_DEPTH :usize = 12;
     const SAMPLE_COUNT :usize = 1 << BIT_DEPTH;
     let mut samples : Vec<Point> = Vec::new();
     for k in 0..SAMPLE_COUNT {
@@ -305,14 +351,28 @@ fn main() {
     }
     lut.save("lut.exr").expect("Saving img failed");
 
-    const OUT_RES :u32 = 256;
+    for i in 0..LUT_RES {
+        let mu = (0.5 + i as f32) * lut_scale;
+        let rough = 0.5;
+        let a = rough * rough;
+        let a2 = a * a;
+        let mut ggx_samples : Vec<Vec3> = Vec::new();
+        for xi in &samples {
+            ggx_samples.push(v3_from_sample(&ggx_sampling(xi[0], xi[1], a2)));
+        }
+        let f = furnace_test_with_lut(mu, rough, &ggx_samples, &lut);
 
-    for i in 0..10 {
-        let mut out_img = RgbImage::new(OUT_RES, OUT_RES);
-        let rough = (i as f32 + 0.5) / 10.0;
-        render_sphere(&mut out_img, rough, 1.0, &lut);
-        let img_name = format!("img/sphere{:02}.png", i);
-        println!("Saving {}", img_name);
-        out_img.save(img_name).expect("Saving img failed");
+        println!("mu {} -> {}", mu, f);
     }
+
+    // const OUT_RES :u32 = 512;
+
+    // for i in 0..10 {
+    //     let mut out_img = RgbImage::new(OUT_RES, OUT_RES);
+    //     let rough = (i as f32 + 0.5) / 10.0;
+    //     render_sphere(&mut out_img, rough, 1.0, &lut);
+    //     let img_name = format!("img/sphere{:02}.png", i);
+    //     println!("Saving {}", img_name);
+    //     out_img.save(img_name).expect("Saving img failed");
+    // }
 }
