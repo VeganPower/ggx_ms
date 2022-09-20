@@ -160,8 +160,7 @@ fn encode_srgb(v : f32) -> u8
 
 fn tonemap(c : f32) -> f32
 {
-    c
-    // (c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14)
+    (c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14)
 }
 
 fn furnace_test(mu: f32, a2: f32, samples: &[Vec3]) -> f32
@@ -214,7 +213,7 @@ fn f_multi_scatter(n_v : f32, n_l : f32, rough : f32, lut: &Rgb32FImage) -> f32
     Ev[0]*El[0]/E_avg
 }
 
-fn render_sphere( img: &mut RgbImage, rough: f32, _f0: f32, samples: &[Point])
+fn render_sphere( img: &mut RgbImage, rough: f32, f0: f32, lut: &Rgb32FImage)
 {
     let dx = 1.0 / img.width() as f32;
     let dy = 1.0 / img.height() as f32;
@@ -222,13 +221,12 @@ fn render_sphere( img: &mut RgbImage, rough: f32, _f0: f32, samples: &[Point])
     let black = Rgb([0, 0, 0]);
     let gray = Rgb([g, g, g]);
 
+    let view_dir = Vec3::new(0.0, 0.0, -15.0).normalize();
+    let light_dir = Vec3::new(-4.0, 4.0, -2.0).normalize();
+
     let a = rough * rough;
     let a2 = a * a;
-    let mut ggx_samples : Vec<Vec3> = Vec::new();
-    for xi in samples
-    {
-        ggx_samples.push(v3_from_sample(&ggx_sampling(xi[0], xi[1], a2)));
-    }
+
     for j in 0..img.height()
     {
         let v = (0.5 + j as f32) * dy;
@@ -241,10 +239,30 @@ fn render_sphere( img: &mut RgbImage, rough: f32, _f0: f32, samples: &[Point])
             if delta < 1.0
             {   // inside the sphere
                 let z = -(1.0 - delta).sqrt();
-                // let n = Vec3::new(x, y, z);
-                let furnace = furnace_test(-z, a2, &ggx_samples);
+                let n = Vec3::new(x, y, z);
+                // let furnace = furnace_test(-z, a2, &ggx_samples);
+                let mut result = 0.0;
 
-                let t = tonemap(furnace);
+                let h = (view_dir + light_dir).normalize();
+                let n_l = dot(&n, &light_dir);
+                if n_l > 0.0
+                {
+                    let n_v = dot(&n, &view_dir).clamp(0.0, 1.0);
+                    let v_h = dot(&view_dir, &h).clamp(0.0, 1.0);
+                    let n_h = dot(&n, &h).clamp(0.0, 1.0);
+                    let d = d_ggx(n_h, a2);
+                    let f = fresnel_schlick(f0, 1.0, v_h); // Always 1.0
+                    let g = v_smith_u(n_l, n_v, a2);
+                    let s = d * f * g; // (4.0 * n_h * n_v) simplify with V
+                    // let s = brdf_s(n_v, n_l, n_h, v_h, a, f0);
+                    let pdf = 4.0 * v_h / n_h;
+                    // let pdf = 1.0 / TAU; // pdf is d_ggx() cos(theta) sin(theta)
+                    // let pdf = 1.0; // pdf is d_ggx() cos(theta) sin(theta)
+                                   // but it simplify with s that should be multiplied by cos(theta)
+                    result = (s + f_multi_scatter(n_v, n_l, rough, lut)) * n_l;// / (4.0 * n_v);
+                }
+
+                let t = tonemap(result);
                 let r_ = encode_srgb(t);
                 let g_ = r_;//encode_srgb(y*0.5+0.5);
                 let b_ = r_;//encode_srgb(g*0.5+0.5);
@@ -262,7 +280,7 @@ fn main() {
     for k in 0..SAMPLE_COUNT {
         samples.push(hammerslay(k, BIT_DEPTH));
     }
-    let mut img = Rgb32FImage::new(LUT_RES, LUT_RES);
+    let mut lut = Rgb32FImage::new(LUT_RES, LUT_RES);
     let lut_scale = 1.0 / LUT_RES as f32;
     for j in 0..LUT_RES {
         let rough = (0.5 + j as f32) * lut_scale;
@@ -282,17 +300,17 @@ fn main() {
         for i in 0..LUT_RES {
             let mu = (0.5 + i as f32) * lut_scale;
             let f = 1.0 - furnace_test(mu, a2, &ggx_samples);
-            img.put_pixel(i, j, Rgb([f, e_agv, f]));
+            lut.put_pixel(i, j, Rgb([f, e_agv, f]));
         }
     }
-    img.save("lut.exr").expect("Saving img failed");
+    lut.save("lut.exr").expect("Saving img failed");
 
     const OUT_RES :u32 = 256;
 
     for i in 0..10 {
         let mut out_img = RgbImage::new(OUT_RES, OUT_RES);
         let rough = (i as f32 + 0.5) / 10.0;
-        render_sphere(&mut out_img, rough, 1.0, &samples);
+        render_sphere(&mut out_img, rough, 1.0, &lut);
         let img_name = format!("img/sphere{:02}.png", i);
         println!("Saving {}", img_name);
         out_img.save(img_name).expect("Saving img failed");
